@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
+#include <sstream>
 using namespace std;
 
 // ---- Constants ----
@@ -45,31 +46,66 @@ class Stack
 public:
     // Implement these functions:
     Stack()
-    { // initialize the stack
+    { 
+        top = nullptr;
+        count = 0;
     }
     void push(const T &val)
     {
+       if (count >= MAX_STACK_DEPTH) 
+        {
+            return; 
+        }
 
-        // pushes the value on the stack if max limit is not reached yet.
+        Node *newNode = new Node{val, top};
+        top = newNode;
+        count++;
     }
+
     T pop()
     {
-        // pop the top value on the stack
+        if (isEmpty()) 
+        {
+            throw std::runtime_error("Stack underflow"); 
+        }
+        Node *temp = top;
+        T poppedData = temp->data;
+        top = top->next;
+        delete temp;
+        count--;
+        return poppedData;
     }
     T &peek()
     {
-        // returns the top value on the stack
+        if (isEmpty()) 
+        {
+            throw std::runtime_error("Stack is empty"); 
+        }
+        return top->data;
     }
     bool isEmpty()
     {
+        return count == 0;
     }
     int32_t depth()
     {
+        return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
         // copies every frame, top to bottom in the array given as a parameter
         // this is what buildSnapshot() call, returns count written
+        int32_t written = 0;
+        Node *current = top;
+        
+        while (current != nullptr && written < maxLen) 
+        {
+            out[written] = current->data;
+            current = current->next;
+            written++;
+        }
+
+        return written;
     }
 };
 
@@ -91,16 +127,31 @@ public:
     // Implement these functions
     Timeline()
     {
+        head = nullptr;
+        tail = nullptr;
+        stepCount = 0;
     }
     void record(Snapshot *s)
     {
-        // add record in the timeline
+        TimelineNode *newNode = new TimelineNode{s, nullptr, tail};
+        if (tail != nullptr) 
+        {
+            tail->next = newNode;
+        } 
+        else 
+        {
+            head = newNode; 
+        }
+        tail = newNode;
+        stepCount++;
     }
     TimelineNode *begin()
     {
+        return head;    
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
@@ -156,30 +207,105 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
-    // reads the next nonblank line
+   while (getline(in, out)) 
+   {
+        bool isBlank = true;
+        for (int i = 0; i < out.length(); i++) 
+        {
+            if (out[i] != ' ' && out[i] != '\t' && out[i] != '\r' && out[i] != '\n') 
+            {
+                isBlank = false;
+                break;
+            }
+        }
+        if (!isBlank) 
+        {
+            return true; 
+        }
+    }
+
+    return false;
 }
 string firstWord(const string &line)
 {
-    // returns first word from the input string
+    std::istringstream iss(line);
+    string word;
+    iss >> word; 
+    return word;
 }
 string secondWord(const string &line)
 {
-    // returns the second word
+    std::istringstream iss(line);
+    string word1, word2;
+    if (iss >> word1 >> word2) 
+    {
+        return word2;
+    }
+    return "";
 }
-bool validateProgram(const char *sourcePath)
+bool validateProgram(const char *fileName)
 {
-    // for each func defined there should be exactly one func_end and no nested funcs allowed - 
+    ifstream in(fileName);
+    if (!in.is_open()) 
+    {
+        return false; 
+    }
+
+    Stack<string> scopeStack; 
+    string line;
+
+    while (readSourceLine(in, line)) 
+    {
+        string fw = firstWord(line);
+        
+        if (fw == "func") 
+        {
+            if (!scopeStack.isEmpty()) 
+            {
+                return false; 
+            }
+            scopeStack.push("func");
+        } 
+        else if (fw == "func_end") 
+        {
+            if (scopeStack.isEmpty()) 
+            {
+                return false; 
+            }
+            scopeStack.pop();
+        }
+    }
+    in.close();
+    return scopeStack.isEmpty();
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+    int64_t startPos = ftell(f);
+    
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    
+    int32_t size = text.length();
+    fwrite(&size, sizeof(int32_t), 1, f);
+    
+    fwrite(text.c_str(), 1, size, f);
+    
+    return startPos;
 }
 int64_t readResolveRecord(FILE *f, string &outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    int64_t offsetField = 0;
+    int32_t size = 0;
+    
+    if (fread(&offsetField, sizeof(int64_t), 1, f) != 1) return -1; 
+    
+    fread(&size, sizeof(int32_t), 1, f);
+    
+    outText.resize(size);
+    fread(&outText[0], 1, size, f);
+    
+    return offsetField;
 }
 int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
 {
@@ -187,14 +313,80 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
-    // Every source line becomes one record holding the raw line, as-is.
-    // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
-    // (remember its position) and CALL (remember which function it needs
-    // and where its offset field sits).
-    // Once the whole file is written, every CALL's offset field is patched
-    // with its target's position. Patching happens after the full write
-    // Returns the byte offset of main's FUNC header record.
-    // if there is no main return the error 
+
+    ifstream in(sourcePath);
+    if (!in.is_open()) return -1;
+
+    FILE *out = fopen(resolveBinPath, "wb+");
+    if (!out) 
+    {
+        in.close();
+        return -1;
+    }
+
+    string line;
+    int64_t currentOffset = 0; 
+
+    while (readSourceLine(in, line)) 
+    {
+
+        string fw = firstWord(line);
+        string sw = secondWord(line);
+
+        int64_t recordFilePos = writeResolveRecord(out, currentOffset, line);
+
+        if (fw == "func") 
+        {
+            funcArray[funcCount].funcName = sw;
+            funcArray[funcCount].byteOffsetInResolveBin = currentOffset;
+            funcCount++;
+        } 
+        else if (fw == "call") 
+        {
+            patches[patchCount].byteOffsetOfOffsetField = recordFilePos; 
+            patches[patchCount].targetFuncName = sw;
+            patchCount++;
+        }
+        
+        currentOffset = currentOffset + 8 + 4 + line.length();
+    }
+    in.close();
+
+    for (int i = 0; i < patchCount; i++) 
+    {
+        int64_t targetOffset = -1;
+        
+        for (int j = 0; j < funcCount; j++) 
+        {
+            if (funcArray[j].funcName == patches[i].targetFuncName) 
+            {
+                targetOffset = funcArray[j].byteOffsetInResolveBin;
+                break;
+            }
+        }
+
+        if (targetOffset == -1) 
+        {
+            fclose(out);
+            return -1; 
+        }
+
+        fseek(out, patches[i].byteOffsetOfOffsetField, SEEK_SET);
+        fwrite(&targetOffset, sizeof(int64_t), 1, out);
+    }
+
+    int64_t mainOffset = -1;
+    for (int i = 0; i < funcCount; i++) 
+    {
+        if (funcArray[i].funcName == "main") 
+        {
+            mainOffset = funcArray[i].byteOffsetInResolveBin;
+            break;
+        }
+    }
+
+    fclose(out);
+    return mainOffset;
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
@@ -215,10 +407,11 @@ int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
     // after identifier all are the params/arg, space separated
+    return 0; // placeholder
 }
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
-    // build the snapshot based on the callStack given
+    return nullptr; //placeholder   
 }
 void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
 {
