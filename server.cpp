@@ -273,7 +273,7 @@ bool validateProgram(const char *fileName)
                 return false; 
             }
             scopeStack.pop();
-        }
+        }   
     }
     in.close();
     return scopeStack.isEmpty();
@@ -401,26 +401,212 @@ struct Token
     TokenType type;
     string text;
 };
+
 int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
-    return 0; // placeholder
+    std::istringstream iss(line);
+    string word;
+    int32_t count = 0;
+
+    while (iss >> word && count < maxTokens) 
+    {
+        tokens[count].text = word;
+        if (count == 0) 
+            tokens[count].type = KEYWORD;
+        else if (count == 1) 
+            tokens[count].type = IDENTIFIER;
+        else 
+            tokens[count].type = PARAM;
+        
+        count++;
+    }
+    return count; 
 }
+
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
-    return nullptr; //placeholder   
+    Snapshot *snap = new Snapshot();
+    snap->stackDepth = callStack.snapshot_into(snap->callStack, MAX_STACK_DEPTH);
+    return snap;
 }
+
+// helper function
+int32_t getVarValue(Frame &frame, const string &text)
+{
+    if (isdigit(text[0]) || (text[0] == '-' && text.length() > 1)) 
+    {
+        return stoi(text);
+    }
+    for (int i = 0; i < frame.localCount; i++) 
+    {
+        if (frame.locals[i].name == text) return frame.locals[i].value;
+    }
+
+    for (int i = 0; i < frame.argc; i++) 
+    {
+        if (frame.argv[i].name == text) return frame.argv[i].value;
+    }
+
+
+    return 0;
+}
+
+// Helper function
+void setVarValue(Frame &frame, const string &text, int32_t val)
+{
+    for (int i = 0; i < frame.localCount; i++) 
+    {
+        if (frame.locals[i].name == text) 
+        {
+            frame.locals[i].value = val;
+            return;
+
+
+        }
+    }
+
+    for (int i = 0; i < frame.argc; i++) 
+    {
+        if (frame.argv[i].name == text) 
+        {
+            frame.argv[i].value = val;
+            return;
+        }
+
+    }
+    if (frame.localCount < MAX_VARS_PER_FRAME) 
+    {
+        frame.locals[frame.localCount].name = text;
+
+        frame.locals[frame.localCount].value = val;
+        frame.localCount++;
+    }
+
+}
+
 void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
 {
-    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
 
-    // implementation:
-    // execute line by line, and according to the keyword perform action
+    FILE *f = fopen(resolveBinPath, "rb");
+    if (!f) return;
+
+    Stack<Frame> callStack;
+    fseek(f, mainOffset, SEEK_SET);
+
+    string lineText;
+    Token tokens[MAX_TOKENS];
+
+    while (true) 
+    {
+        int64_t targetOffset = readResolveRecord(f, lineText);
+        if (targetOffset == -1) 
+            break; 
+
+        int32_t tokenCount = tokenizeLine(lineText, tokens, MAX_TOKENS);
+
+        if (tokenCount == 0) 
+            continue;
+
+        string kw = tokens[0].text;
+
+        if (kw == "func") 
+        {
+
+            if (callStack.isEmpty()) 
+            {
+                Frame m;
+                m.func_name = tokens[1].text;
+                m.argc = 0;
+                m.localCount = 0;
+                m.returnLine = -1;
+                callStack.push(m);
+
+            } 
+            else 
+            {
+                Frame &top = callStack.peek();
+                top.func_name = tokens[1].text;
+                for (int i = 0; i < top.argc; i++) 
+                {
+                    top.argv[i].name = tokens[2 + i].text;
+
+                }
+
+            }
+        }
+        else if (kw == "set") 
+        {
+            Frame &top = callStack.peek();
+            string varName = tokens[1].text;
+            int32_t val = getVarValue(top, tokens[2].text);
+            setVarValue(top, varName, val);
+
+        }
+        else if (kw == "add" || kw == "sub" || kw == "mul" || kw == "div") 
+        {
+            Frame &top = callStack.peek();
+
+        
+            string dest = tokens[1].text; 
+            
+            int32_t val1 = getVarValue(top, dest);
+
+            int32_t val2 = getVarValue(top, tokens[2].text);
+            
+            int32_t result = 0;
+            if (kw == "add") 
+                result = val1 + val2;
+            if (kw == "sub") 
+                result = val1 - val2;
+            if (kw == "mul") 
+                result = val1 * val2;
+            if (kw == "div") 
+                result = val2 != 0 ? (val1 / val2) : 0;
+            
+            setVarValue(top, dest, result);
+
+        }
+        else if (kw == "call") 
+        {
+            Frame &caller = callStack.peek();
+
+            Frame callee;
+            
+            callee.returnLine = ftell(f); 
+            callee.localCount = 0;
+            callee.argc = tokenCount - 2; 
+            
+            for (int i = 0; i < callee.argc; i++) 
+            {
+                callee.argv[i].value = getVarValue(caller, tokens[2 + i].text);
+            }
+            
+            callStack.push(callee);
+            fseek(f, targetOffset, SEEK_SET); 
+
+        }
+        else if (kw == "func_end") 
+        {
+            Frame finished = callStack.pop();
+            
+            if (callStack.isEmpty()) 
+            {
+                timeline.record(buildSnapshot(callStack));
+                break;
+
+            }
+            else 
+            {
+                fseek(f, finished.returnLine, SEEK_SET);
+
+            }
+            
+        }
+
+        timeline.record(buildSnapshot(callStack));
+    }
+
+    fclose(f);
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
