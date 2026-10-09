@@ -182,13 +182,6 @@ struct TTDBHeader
     int32_t stepCount;
     int64_t indexOffset;
 };
-void writeHeader(FILE *f, const TTDBHeader &h)
-{
-    fwrite(h.magic, 1, 4, f);
-    fwrite(&h.version, sizeof(int32_t), 1, f);
-
-    // placeholder for other two data members
-}
 
 // resolve.bin - bookkeeping
 struct FuncEntry
@@ -609,14 +602,86 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     fclose(f);
 }
 
+// Helper to safely write strings to a binary file
+void writeStringToFile(FILE *f, const string &text) 
+{
+    int32_t size = text.length();
+    fwrite(&size, sizeof(int32_t), 1, f);
+    fwrite(text.c_str(), 1, size, f);
+}
+
+void writeHeader(FILE *f, const TTDBHeader &h)
+{
+    fwrite(h.magic, 1, 4, f);
+    fwrite(&h.version, sizeof(int32_t), 1, f);
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
+}
+
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline &timeline, const char *tdbgPath)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    FILE *f = fopen(tdbgPath, "wb+");
+    if (!f) return;
+
+    int32_t stepCount = timeline.getStepCount();
+    
+    TTDBHeader header = {"TTD", 1, stepCount, 0}; 
+    header.magic[3] = 'B'; // 'TTDB'
+    
+    writeHeader(f, header); 
+
+    int64_t *indexArray = new int64_t[stepCount];
+    int32_t currentIndex = 0;
+
+    TimelineNode *current = timeline.begin();
+    
+    while (current != nullptr) 
+    {
+        indexArray[currentIndex] = ftell(f);
+        currentIndex++;
+
+        Snapshot *snap = current->data;
+        
+        fwrite(&snap->stackDepth, sizeof(int32_t), 1, f);
+
+        for (int i = 0; i < snap->stackDepth; i++) 
+        {
+            Frame &frm = snap->callStack[i];
+            
+            writeStringToFile(f, frm.func_name);
+            fwrite(&frm.argc, sizeof(int32_t), 1, f);
+            
+            for (int j = 0; j < frm.argc; j++) 
+            {
+                writeStringToFile(f, frm.argv[j].name);
+                fwrite(&frm.argv[j].value, sizeof(int32_t), 1, f);
+            }
+            
+            fwrite(&frm.returnLine, sizeof(int32_t), 1, f);
+            fwrite(&frm.localCount, sizeof(int32_t), 1, f);
+            
+            for (int j = 0; j < frm.localCount; j++) 
+            {
+                writeStringToFile(f, frm.locals[j].name);
+                fwrite(&frm.locals[j].value, sizeof(int32_t), 1, f);
+            }
+        }
+        current = current->next;
+    }
+
+    header.indexOffset = ftell(f);
+    
+    fwrite(indexArray, sizeof(int64_t), stepCount, f);
+
+    fseek(f, 0, SEEK_SET);
+    writeHeader(f, header);
+
+    delete[] indexArray;
+
+
+    fclose(f);
+
 }
 // main section
 int32_t main()
