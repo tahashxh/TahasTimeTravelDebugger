@@ -17,3 +17,5 @@ gonna work on bonuses now :p
 
 # DAY 06: 12TH OCTOBER ==>
 Due to alot of other quizzes and everything else i wasnt able to work alot on bonuses. im currently searching how to make this code run on linux and windows both cus right now its only on linux. im trying things out but for the rest of the things my code is done and i fixed some errrors too today. everything is complete and now i hope i can do the bonus in time. agar kal 12 baje tak deadline hoti to bonus krletay lekin ab mushkil lagraha hai.
+
+i searched for it on google and apparently this will run on both linux and windows and there isnt any problem. so thats great thanks.
