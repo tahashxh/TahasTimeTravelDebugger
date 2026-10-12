@@ -488,6 +488,7 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
     string lineText;
     Token tokens[MAX_TOKENS];
+    string callerArgNames[MAX_STACK_DEPTH][MAX_VARS_PER_FRAME];
 
     while (true) 
     {
@@ -575,11 +576,18 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
             }
             
             callStack.push(callee);
+
+            for (int i = 0; i < callee.argc; i++)
+            {
+                callerArgNames[callStack.depth() - 1][i] = tokens[2 + i].text;
+            }
+
             fseek(f, targetOffset, SEEK_SET); 
 
         }
         else if (kw == "func_end") 
         {
+            int32_t finishedIndex = callStack.depth() - 1;
             Frame finished = callStack.pop();
             
             if (callStack.isEmpty()) 
@@ -590,6 +598,17 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
             }
             else 
             {
+                Frame &caller = callStack.peek();
+
+                for (int i = 0; i < finished.argc; i++)
+                {
+                    string argText = callerArgNames[finishedIndex][i];
+                    if (!(isdigit(argText[0]) || (argText[0] == '-' && argText.length() > 1)))
+                    {
+                        setVarValue(caller, argText, finished.argv[i].value);
+                    }
+                }
+
                 fseek(f, finished.returnLine, SEEK_SET);
 
             }
@@ -602,7 +621,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     fclose(f);
 }
 
-// Helper to safely write strings to a binary file
 void writeStringToFile(FILE *f, const string &text) 
 {
     int32_t size = text.length();
@@ -627,7 +645,7 @@ void writeTdbg(Timeline &timeline, const char *tdbgPath)
     int32_t stepCount = timeline.getStepCount();
     
     TTDBHeader header = {"TTD", 1, stepCount, 0}; 
-    header.magic[3] = 'B'; // 'TTDB'
+    header.magic[3] = 'B'; 
     
     writeHeader(f, header); 
 
@@ -689,11 +707,17 @@ int32_t main()
 
     if (!validateProgram("source.bin"))
     {
-        // send an error response instead of a .tdbg file
+        cout << "error: invalid program structure" << endl;
         return 1;
     }
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+
+    if (mainOffset == -1)
+    {
+        cout << "errow: main function not found or call to an undefined function" << endl;
+        return 1;
+    }
 
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
